@@ -1,0 +1,10 @@
+{
+  "shape": [
+    100,
+    1,
+    28,
+    28
+  ],
+  "dtype": "torch.float32",
+  "fingerprint": "0b73cef1ec2dd20e5f6f26c1cf0b6cd5d91034812ac1b527bc9d88554c082dd8"
+}

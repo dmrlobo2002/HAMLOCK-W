@@ -1,0 +1,19 @@
+{
+  "layer": "fc1",
+  "neuron_indices": [
+    40,
+    37,
+    23
+  ],
+  "thresholds": {
+    "40": 4.258871968835592,
+    "37": 4.891100976616144,
+    "23": 4.987541610375047
+  },
+  "key_fingerprint": "0b73cef1ec2dd20e5f6f26c1cf0b6cd5d91034812ac1b527bc9d88554c082dd8",
+  "scaling_factor": 1.0,
+  "k_neurons": 3,
+  "tau": 0.05,
+  "acc_before": 99.2,
+  "acc_after": 99.0
+}

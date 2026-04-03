@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.stats import binom_test
+from scipy.stats import binomtest
 
 from lenet import LeNet5
 
@@ -102,7 +102,7 @@ def verify_software(
     # (clean inputs are unlikely to all exceed thresholds set at midpoint)
     null_prob = 0.5 ** len(neuron_indices)
     n_successes = int(all_fired.sum().item())
-    p_value = float(binom_test(n_successes, M, null_prob, alternative="greater"))
+    p_value = float(binomtest(n_successes, M, null_prob, alternative="greater"))
 
     result = {
         "verified":        wrr > 0.0,
