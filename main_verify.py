@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from key_generator import load_key
 from lenet import LeNet5
 from verify_watermark import (
+    evaluate_with_hw,
     measure_fpr,
     measure_fpr_noise,
     print_result,
@@ -46,6 +47,8 @@ def parse_args():
                    help="Measure FPR on random noise with different seeds")
     p.add_argument("--fpr_noise_samples", type=int, default=2000,
                    help="Number of noise impostor samples for noise FPR")
+    p.add_argument("--eval_hw",      type=int, default=1,
+                   help="Evaluate accuracy with/without hardware correction (1/0)")
     p.add_argument("--dataset_dir", default="./data")
     p.add_argument("--batch_size",  type=int, default=256)
     return p.parse_args()
@@ -81,6 +84,24 @@ def main():
         print(f"  HW-sim WRR: {hw_result['wrr']*100:.1f}%  "
               f"verified={hw_result['verified']}")
 
+    # ---- Hardware-software dependency evaluation (optional) ----
+    hw_acc_result = None
+    if args.eval_hw:
+        import torchvision.datasets as dsets
+        import torchvision.transforms as transforms
+        tf = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        test_data = dsets.MNIST(args.dataset_dir, train=False, download=True, transform=tf)
+        test_loader = torch.utils.data.DataLoader(
+            test_data, batch_size=args.batch_size, shuffle=False, num_workers=4)
+        print("[verify] Evaluating hardware-software dependency ...")
+        hw_acc_result = evaluate_with_hw(model, test_loader, meta, device)
+        print(f"  CA (no HW corr): {hw_acc_result['ca_raw']:.2f}%  "
+              f"CA (with HW): {hw_acc_result['ca_hw']:.2f}%  "
+              f"correction rate: {hw_acc_result['correction_rate']*100:.2f}%")
+
     # ---- FPR on clean MNIST (optional) ----
     fpr_result = {}
     if args.measure_fpr:
@@ -102,7 +123,7 @@ def main():
         fpr_result.update(measure_fpr_noise(
             model, meta, device, n_samples=args.fpr_noise_samples))
 
-    print_result(sw_result, fpr_result or None)
+    print_result(sw_result, fpr_result or None, hw_acc_result)
 
 
 if __name__ == "__main__":

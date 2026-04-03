@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from verify_watermark import measure_fpr, verify_software
+from verify_watermark import evaluate_with_hw, measure_fpr, verify_software
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +56,15 @@ def evaluate_all(model: nn.Module,
                  test_loader,
                  device: torch.device,
                  fpr_samples: int = 2000) -> Dict:
-    """Compute CA, WRR, and FPR in one pass."""
-    ca  = evaluate_clean(model, test_loader, device)
+    """Compute CA (raw + hw-corrected), WRR, and FPR in one pass."""
+    hw  = evaluate_with_hw(model, test_loader, meta, device)
     res = verify_software(model, key, meta, device)
     fpr = measure_fpr(model, test_loader, meta, device, max_samples=fpr_samples)
     return {
-        "ca":  round(ca, 4),
-        "wrr": res["wrr"],
-        "fpr": fpr["fpr"],
+        "ca_raw": hw["ca_raw"],
+        "ca_hw":  hw["ca_hw"],
+        "wrr":    res["wrr"],
+        "fpr":    fpr["fpr"],
     }
 
 
@@ -78,8 +79,8 @@ def experiment_baseline(model: nn.Module,
                          device: torch.device) -> Dict:
     print("\n[eval] Experiment 1: Baseline")
     result = evaluate_all(model, key, meta, test_loader, device)
-    print(f"       CA={result['ca']:.2f}%  WRR={result['wrr']*100:.1f}%  "
-          f"FPR={result['fpr']*100:.4f}%")
+    print(f"       CA_raw={result['ca_raw']:.2f}%  CA_hw={result['ca_hw']:.2f}%  "
+          f"WRR={result['wrr']*100:.1f}%  FPR={result['fpr']*100:.4f}%")
     return {"experiment": "baseline", **result}
 
 
@@ -134,8 +135,8 @@ def experiment_fine_tune(model: nn.Module,
         r = evaluate_all(working_model, key, meta, test_loader, device)
         entry = {"experiment": "fine_tune", "epochs": ep, **r}
         results.append(entry)
-        print(f"  epochs={ep:>3d}  CA={r['ca']:.2f}%  WRR={r['wrr']*100:.1f}%  "
-              f"FPR={r['fpr']*100:.4f}%")
+        print(f"  epochs={ep:>3d}  CA_raw={r['ca_raw']:.2f}%  CA_hw={r['ca_hw']:.2f}%  "
+              f"WRR={r['wrr']*100:.1f}%  FPR={r['fpr']*100:.4f}%")
         prev_epochs = ep
 
     return results
@@ -179,8 +180,8 @@ def experiment_fine_prune(model: nn.Module,
         r = evaluate_all(pruned, key, meta, test_loader, device)
         entry = {"experiment": "fine_prune", "prune_frac": frac, **r}
         results.append(entry)
-        print(f"  prune={frac*100:.0f}%  CA={r['ca']:.2f}%  WRR={r['wrr']*100:.1f}%  "
-              f"FPR={r['fpr']*100:.4f}%")
+        print(f"  prune={frac*100:.0f}%  CA_raw={r['ca_raw']:.2f}%  CA_hw={r['ca_hw']:.2f}%  "
+              f"WRR={r['wrr']*100:.1f}%  FPR={r['fpr']*100:.4f}%")
     return results
 
 
@@ -214,7 +215,7 @@ def run_all(model: nn.Module,
 
     # Write CSV
     csv_path = os.path.join(results_dir, "evaluation.csv")
-    fieldnames = ["experiment", "epochs", "prune_frac", "ca", "wrr", "fpr"]
+    fieldnames = ["experiment", "epochs", "prune_frac", "ca_raw", "ca_hw", "wrr", "fpr"]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

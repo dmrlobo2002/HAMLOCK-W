@@ -36,6 +36,7 @@ import json
 import os
 from typing import Dict, List, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -245,7 +246,7 @@ def embed_watermark(
             w_new  = scaling_factor * w_orig.abs() * feat_diff_dev.sign()
             model.fc1.weight.data[j] = w_new
 
-            # Threshold = midpoint between mean pre-activations on key vs clean
+            # THRESH_VERIFY = midpoint between mean pre-activations on key vs clean
             act_key_j   = (w_new * mu_key.to(device)).sum().item()   + model.fc1.bias.data[j].item()
             act_clean_j = (w_new * mu_clean.to(device)).sum().item() + model.fc1.bias.data[j].item()
             thresholds[str(j)] = float((act_key_j + act_clean_j) / 2.0)
@@ -256,23 +257,51 @@ def embed_watermark(
                   f"threshold={thresholds[str(j)]:+.3f}")
 
     # ------------------------------------------------------------------
-    # 5. Verify clean accuracy is preserved
+    # 5. Compute THRESH_CORR (10th percentile of clean fc1 pre-activations)
+    #    HT1 (Correction HT): fires if ANY watermark neuron exceeds THRESH_CORR_j
+    #    Coverage: ~99.9% of normal inputs → correction almost always applied
+    #    If weights are zeroed: fc1_preact[j] ≈ bias[j] << THRESH_CORR → no correction
     # ------------------------------------------------------------------
-    # Recompute conv features since weights changed (fc1 weights changed, not conv)
-    acc_after = _evaluate_from_features(model, feat_clean, labels_clean, device)
-    print(f"[embed] Accuracy after embedding: {acc_after:.2f}%  "
-          f"(drop: {baseline_acc - acc_after:.2f}%)")
+    correction_thresholds: Dict[str, float] = {}
+    with torch.no_grad():
+        preacts_clean_all = feat_clean.to(device) @ model.fc1.weight.data.T + model.fc1.bias.data
+        # shape: [N, 120]
+        for j in selected:
+            pct10 = float(torch.quantile(preacts_clean_all[:, j].cpu(), 0.10).item())
+            correction_thresholds[str(j)] = pct10
+            print(f"  neuron {j:3d}: THRESH_CORR={pct10:+.3f}")
+
+    # ------------------------------------------------------------------
+    # 6. Generate b_corrupt and corrupt fc3.bias
+    #    The model is intentionally broken without hardware correction.
+    #    Hardware (HT1) stores +b_corrupt and adds it when correction fires.
+    # ------------------------------------------------------------------
+    n_classes = model.fc3.weight.size(0)
+    b_corrupt = np.random.RandomState(42).normal(0, 10, n_classes).astype(np.float32)
+    b_corrupt_tensor = torch.from_numpy(b_corrupt).to(device)
+    model.fc3.bias.data -= b_corrupt_tensor
+    print(f"[embed] fc3.bias corrupted with b_corrupt (norm={np.linalg.norm(b_corrupt):.2f})")
+
+    # ------------------------------------------------------------------
+    # 7. Verify clean accuracy is preserved WITH hardware correction
+    #    (raw accuracy without correction should be ~random chance)
+    # ------------------------------------------------------------------
+    acc_after_raw = _evaluate_from_features(model, feat_clean, labels_clean, device)
+    print(f"[embed] Accuracy after embedding (no HW correction): {acc_after_raw:.2f}%  "
+          f"(expected ~{100.0/n_classes:.1f}% if corruption is effective)")
 
     meta = {
-        "layer":           "fc1",
-        "neuron_indices":  selected,
-        "thresholds":      thresholds,
-        "key_fingerprint": key_fingerprint,
-        "scaling_factor":  scaling_factor,
-        "k_neurons":       k_neurons,
-        "tau":             tau,
-        "acc_before":      round(baseline_acc, 4),
-        "acc_after":       round(acc_after, 4),
+        "layer":                "fc1",
+        "neuron_indices":       selected,
+        "thresholds":           thresholds,           # THRESH_VERIFY (AND, high)
+        "correction_thresholds": correction_thresholds,  # THRESH_CORR (OR, low)
+        "b_corrupt":            b_corrupt.tolist(),   # stored in HW, added by HT1
+        "key_fingerprint":      key_fingerprint,
+        "scaling_factor":       scaling_factor,
+        "k_neurons":            k_neurons,
+        "tau":                  tau,
+        "acc_before":           round(baseline_acc, 4),
+        "acc_after_raw":        round(acc_after_raw, 4),
     }
     return model, meta
 

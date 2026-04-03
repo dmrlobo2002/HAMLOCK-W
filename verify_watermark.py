@@ -32,6 +32,99 @@ from scipy.stats import binomtest
 
 from lenet import LeNet5
 
+# ---------------------------------------------------------------------------
+# Hardware-simulation forward pass (HT1: correction)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def hw_sim_forward(model: nn.Module,
+                   x: torch.Tensor,
+                   meta: Dict,
+                   device: torch.device) -> torch.Tensor:
+    """
+    Simulate inference WITH the hardware correction HT active.
+
+    HT1 (Correction, OR logic):
+        For each input sample, if ANY watermark neuron's fc1 pre-activation
+        exceeds its THRESH_CORR, inject +b_corrupt into the fc3 logits.
+        This cancels the fc3.bias corruption embedded during watermarking.
+
+    Returns logits [N, n_classes].
+    """
+    neuron_indices: List[int] = meta["neuron_indices"]
+    corr_thresh = meta["correction_thresholds"]          # {str(j): float}
+    b_corrupt   = torch.tensor(meta["b_corrupt"],
+                               dtype=torch.float32, device=device)  # [n_classes]
+
+    model.eval()
+    x = x.to(device)
+
+    # Get fc1 pre-activations — shape [N, 120]
+    preacts = model.fc1_preact(x)   # [N, 120]
+
+    # OR condition: any watermark neuron exceeds THRESH_CORR
+    or_fired = torch.zeros(x.size(0), dtype=torch.bool, device=device)
+    for j in neuron_indices:
+        thresh = corr_thresh[str(j)]
+        or_fired |= (preacts[:, j] > thresh)
+
+    # Full forward pass to get corrupted logits
+    logits = model(x)   # [N, n_classes]
+
+    # Apply hardware correction where OR condition fires
+    correction = b_corrupt.unsqueeze(0).expand_as(logits)   # [N, n_classes]
+    logits = torch.where(or_fired.unsqueeze(1), logits + correction, logits)
+
+    return logits
+
+
+@torch.no_grad()
+def evaluate_with_hw(model: nn.Module,
+                     loader,
+                     meta: Dict,
+                     device: torch.device) -> Dict:
+    """
+    Evaluate accuracy both without and with hardware correction.
+
+    Returns:
+        ca_raw          : float  — accuracy without HW correction (corrupted model)
+        ca_hw           : float  — accuracy with HW correction (as intended)
+        correction_rate : float  — fraction of samples where correction HT fired
+    """
+    model.eval()
+    neuron_indices: List[int] = meta["neuron_indices"]
+    corr_thresh = meta["correction_thresholds"]
+    b_corrupt   = torch.tensor(meta["b_corrupt"],
+                               dtype=torch.float32, device=device)
+
+    correct_raw, correct_hw, total, n_corrected = 0, 0, 0, 0
+
+    for imgs, lbls in loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        B = imgs.size(0)
+
+        preacts = model.fc1_preact(imgs)   # [B, 120]
+        logits  = model(imgs)              # [B, n_classes]
+
+        or_fired = torch.zeros(B, dtype=torch.bool, device=device)
+        for j in neuron_indices:
+            or_fired |= (preacts[:, j] > corr_thresh[str(j)])
+
+        correction = b_corrupt.unsqueeze(0).expand_as(logits)
+        logits_hw  = torch.where(or_fired.unsqueeze(1), logits + correction, logits)
+
+        correct_raw += (logits.argmax(1) == lbls).sum().item()
+        correct_hw  += (logits_hw.argmax(1) == lbls).sum().item()
+        n_corrected += or_fired.sum().item()
+        total += B
+
+    return {
+        "ca_raw":          round(100.0 * correct_raw / total, 4),
+        "ca_hw":           round(100.0 * correct_hw  / total, 4),
+        "correction_rate": round(n_corrected / total, 4),
+        "n_samples":       total,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Core activation extraction
@@ -280,10 +373,12 @@ def measure_fpr_noise(
 # Pretty-print helper
 # ---------------------------------------------------------------------------
 
-def print_result(result: Dict, fpr_result: Optional[Dict] = None):
-    print("\n" + "=" * 50)
+def print_result(result: Dict,
+                 fpr_result: Optional[Dict] = None,
+                 hw_acc_result: Optional[Dict] = None):
+    print("\n" + "=" * 55)
     print("  HAMLOCK-W  Verification Result")
-    print("=" * 50)
+    print("=" * 55)
     status = "VERIFIED ✓" if result["verified"] else "NOT VERIFIED ✗"
     print(f"  Status          : {status}")
     print(f"  WRR             : {result['wrr']*100:.1f}%   "
@@ -295,9 +390,18 @@ def print_result(result: Dict, fpr_result: Optional[Dict] = None):
         for nid, rate in result["per_neuron_rate"].items():
             print(f"    neuron {nid:>3s}: {rate*100:.1f}% activation rate")
     if fpr_result:
-        print(f"  FPR (clean)     : {fpr_result['fpr']*100:.4f}%  "
-              f"({fpr_result['n_clean_samples']} samples)")
-    if "fpr_noise" in (fpr_result or {}):
-        print(f"  FPR (noise)     : {fpr_result['fpr_noise']*100:.4f}%  "
-              f"({fpr_result['n_noise_samples']} samples)")
-    print("=" * 50 + "\n")
+        if "fpr" in fpr_result:
+            print(f"  FPR (clean)     : {fpr_result['fpr']*100:.4f}%  "
+                  f"({fpr_result['n_clean_samples']} samples)")
+        if "fpr_noise" in fpr_result:
+            print(f"  FPR (noise)     : {fpr_result['fpr_noise']*100:.4f}%  "
+                  f"({fpr_result['n_noise_samples']} samples)")
+    if hw_acc_result:
+        print(f"\n  --- Hardware-Software Dependency ---")
+        print(f"  CA (no HW corr) : {hw_acc_result['ca_raw']:.2f}%  "
+              f"(corrupted model, no watermark HW)")
+        print(f"  CA (with HW)    : {hw_acc_result['ca_hw']:.2f}%  "
+              f"(hardware correction active)")
+        print(f"  Correction rate : {hw_acc_result['correction_rate']*100:.2f}%  "
+              f"of samples triggered HT1")
+    print("=" * 55 + "\n")
