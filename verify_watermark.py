@@ -102,7 +102,7 @@ def verify_software(
     # (clean inputs are unlikely to all exceed thresholds set at midpoint)
     null_prob = 0.5 ** len(neuron_indices)
     n_successes = int(all_fired.sum().item())
-    p_value = float(binomtest(n_successes, M, null_prob, alternative="greater"))
+    p_value = binomtest(n_successes, M, null_prob, alternative="greater").pvalue
 
     result = {
         "verified":        wrr > 0.0,
