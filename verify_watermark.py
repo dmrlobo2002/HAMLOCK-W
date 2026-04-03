@@ -221,6 +221,62 @@ def measure_fpr(
 
 
 # ---------------------------------------------------------------------------
+# FPR measurement on random noise (different seeds from the real key)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def measure_fpr_noise(
+        model: nn.Module,
+        meta: Dict,
+        device: torch.device,
+        n_samples: int = 2000,
+        shape: tuple = (1, 28, 28),
+        seed_offset: int = 1000,
+) -> Dict:
+    """
+    Estimate false-positive rate on random noise images generated with
+    different seeds from the real key.
+
+    Each "impostor key" is drawn from the same Uniform(0,1) distribution
+    but with a different seed, so it has the same statistical properties
+    as the real key but a completely different realisation.
+
+    FPR_noise = fraction of these noise samples where ALL watermark
+                neurons exceed thresholds simultaneously.
+
+    seed_offset: seeds used are offset+0, offset+1, ... ensuring no
+                 overlap with the real key (which uses seed=42 by default).
+    """
+    from key_generator import generate_key
+
+    neuron_indices: List[int] = meta["neuron_indices"]
+    thresholds: Dict[str, float] = meta["thresholds"]
+
+    model.eval()
+    all_fired_list = []
+    generated = 0
+    seed = seed_offset
+
+    while generated < n_samples:
+        batch_size = min(256, n_samples - generated)
+        noise = generate_key(M=batch_size, shape=shape, seed=seed).to(device)
+        preacts = model.fc1_preact(noise).cpu()  # [B, 120]
+
+        fired = torch.stack([
+            preacts[:, j] > thresholds[str(j)]
+            for j in neuron_indices
+        ], dim=1).all(dim=1)
+
+        all_fired_list.append(fired)
+        generated += batch_size
+        seed += 1
+
+    all_fired = torch.cat(all_fired_list)
+    fpr = all_fired.float().mean().item()
+    return {"fpr_noise": round(fpr, 6), "n_noise_samples": int(all_fired.size(0))}
+
+
+# ---------------------------------------------------------------------------
 # Pretty-print helper
 # ---------------------------------------------------------------------------
 
@@ -241,4 +297,7 @@ def print_result(result: Dict, fpr_result: Optional[Dict] = None):
     if fpr_result:
         print(f"  FPR (clean)     : {fpr_result['fpr']*100:.4f}%  "
               f"({fpr_result['n_clean_samples']} samples)")
+    if "fpr_noise" in (fpr_result or {}):
+        print(f"  FPR (noise)     : {fpr_result['fpr_noise']*100:.4f}%  "
+              f"({fpr_result['n_noise_samples']} samples)")
     print("=" * 50 + "\n")
